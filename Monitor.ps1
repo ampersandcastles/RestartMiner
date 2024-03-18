@@ -63,9 +63,9 @@ while ($true)
   {
     ShowCurrentTemperatures
 
-    Write-Output ("[{0:u}] Waiting for 60 seconds..." -f (Get-Date))
+    Write-Output ("[{0:u}] Waiting for 3 minutes..." -f (Get-Date))
 
-    Start-Sleep -Seconds 60
+    Start-Sleep -Seconds 180
 
     Write-Output ("[{0:u}] Initiating restart" -f (Get-Date))
 
