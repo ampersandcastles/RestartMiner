@@ -5,18 +5,29 @@ $securePass = ConvertTo-SecureString $pass -AsPlainText -Force
 
 $credential = [PSCredential]::new($user, $securePass)
 
-function PerformCheck()
+function GetMinerData($name)
 {
-  $result = Invoke-WebRequest "http://10.128.1.218/cgi-bin/miner_summary.cgi" -Credential $credential
+  $result = Invoke-WebRequest "http://10.128.1.218/cgi-bin/miner_$name.cgi" -Credential $credential
 
   $buffer = [System.IO.MemoryStream]::new($result.Content)
   $reader = [System.IO.StreamReader]::new($buffer)
 
   $json = $reader.ReadToEnd()
 
+  if ($json -like '*Socket connect failed*') { return $null }
+
   $data = $json | ConvertFrom-Json
 
-  $currentMiningSpeedString = $data.SUMMARY."GHS av"
+  return $data
+}
+
+function PerformCheck()
+{
+  $data = GetMinerData("summary")
+
+  if ($data -eq $null) { return $false }
+
+  $currentMiningSpeedString = $data.SUMMARY."GHS 5s"
 
   $currentMiningSpeed = $currentMiningSpeedString -as [decimal]
 
@@ -25,19 +36,21 @@ function PerformCheck()
 
 function CheckTemperatures()
 {
-  $result = Invoke-WebRequest "http://10.128.1.218/cgi-bin/miner_stats.cgi" -Credential $credential
-
-  $buffer = [System.IO.MemoryStream]::new($result.Content)
-  $reader = [System.IO.StreamReader]::new($buffer)
-
-  $json = $reader.ReadToEnd()
-
-  $data = $json | ConvertFrom-Json
+  $data = GetMinerData("stats")
 
   $tempsString = "$($data.STATS[1].temp_pcb1)-$($data.STATS[1].temp_pcb2)-$($data.STATS[1].temp_pcb3)"
   $temps = $tempsString.Split("-")
 
   return ($temps | Measure -Maximum).Maximum
+}
+
+function ShowCurrentTemperatures()
+{
+  $data = GetMinerData("stats")
+
+  $data.STATS[1].PSObject.Properties | `
+    ? { $_ -like '*temp*' -and $_.Value -match "[1-9]" } | `
+    % { "[{0:u}] {1}={2}" -f (Get-Date), $_.Name, $_.Value }
 }
 
 while ($true)
@@ -48,22 +61,17 @@ while ($true)
 
   if (!$isOkay)
   {
-    while ($true)
-    {
-      $maxTemp = CheckTemperatures
+    ShowCurrentTemperatures
 
-      Write-Output ("[{0:u}] Current maximum temperature: {1} C" -f (Get-Date), $maxTemp)
+    Write-Output ("[{0:u}] Waiting for 60 seconds..." -f (Get-Date))
 
-      if ($maxTemp -lt 60) { break }
-
-      Start-Sleep -Seconds 60
-    }
+    Start-Sleep -Seconds 60
 
     Write-Output ("[{0:u}] Initiating restart" -f (Get-Date))
 
     $result = Invoke-WebRequest "http://10.128.1.218/cgi-bin/reboot.cgi" -Credential $credential
 
-    Start-Sleep -Seconds 30
+    Start-Sleep -Seconds 90
 
     while ($true)
     {
@@ -73,10 +81,12 @@ while ($true)
 
       Write-Output ("[{0:u}] Waiting for startup..." -f (Get-Date))
 
-      Start-Sleep -Seconds 60
+      Start-Sleep -Seconds 10
     }
 
     Write-Output ("[{0:u}] Reboot complete" -f (Get-Date))
+
+    ShowCurrentTemperatures
   }
 
   Start-Sleep -Seconds 10
