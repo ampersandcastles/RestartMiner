@@ -1,93 +1,93 @@
+# Define credentials
 $user = "root"
 $pass = "root"
-
 $securePass = ConvertTo-SecureString $pass -AsPlainText -Force
-
 $credential = [PSCredential]::new($user, $securePass)
 
-function GetMinerData($name)
-{
-  $result = Invoke-WebRequest "http://10.128.1.218/cgi-bin/miner_$name.cgi" -Credential $credential
+# Function to get miner data
+function Get-MinerData($name) {
+    $url = "http://10.128.1.218/cgi-bin/miner_$name.cgi"
+    $response = Invoke-WebRequest -Uri $url -Credential $credential -AllowUnencryptedAuthentication
+    $jsonContent = $response.Content
 
-  $buffer = [System.IO.MemoryStream]::new($result.Content)
-  $reader = [System.IO.StreamReader]::new($buffer)
-
-  $json = $reader.ReadToEnd()
-
-  if ($json -like '*Socket connect failed*') { return $null }
-
-  $data = $json | ConvertFrom-Json
-
-  return $data
-}
-
-function PerformCheck()
-{
-  $data = GetMinerData("summary")
-
-  if ($data -eq $null) { return $false }
-
-  $currentMiningSpeedString = $data.SUMMARY."GHS 5s"
-
-  $currentMiningSpeed = $currentMiningSpeedString -as [decimal]
-
-  return (($currentMiningSpeed -ne $null) -and ($currentMiningSpeed -gt 0))
-}
-
-function CheckTemperatures()
-{
-  $data = GetMinerData("stats")
-
-  $tempsString = "$($data.STATS[1].temp_pcb1)-$($data.STATS[1].temp_pcb2)-$($data.STATS[1].temp_pcb3)"
-  $temps = $tempsString.Split("-")
-
-  return ($temps | Measure -Maximum).Maximum
-}
-
-function ShowCurrentTemperatures()
-{
-  $data = GetMinerData("stats")
-
-  $data.STATS[1].PSObject.Properties | `
-    ? { $_ -like '*temp*' -and $_.Value -match "[1-9]" } | `
-    % { "[{0:u}] {1}={2}" -f (Get-Date), $_.Name, $_.Value }
-}
-
-while ($true)
-{
-  $isOkay = PerformCheck
-
-  Write-Output ("[{0:u}] Healthy: {1}" -f (Get-Date), $isOkay)
-
-  if (!$isOkay)
-  {
-    ShowCurrentTemperatures
-
-    Write-Output ("[{0:u}] Waiting for 3 minutes..." -f (Get-Date))
-
-    Start-Sleep -Seconds 180
-
-    Write-Output ("[{0:u}] Initiating restart" -f (Get-Date))
-
-    $result = Invoke-WebRequest "http://10.128.1.218/cgi-bin/reboot.cgi" -Credential $credential
-
-    Start-Sleep -Seconds 90
-
-    while ($true)
-    {
-      $isOkay = PerformCheck
-
-      if ($isOkay) { break }
-
-      Write-Output ("[{0:u}] Waiting for startup..." -f (Get-Date))
-
-      Start-Sleep -Seconds 10
+    if ($jsonContent -like '*Socket connect failed*') {
+        return $null
     }
 
-    Write-Output ("[{0:u}] Reboot complete" -f (Get-Date))
+    $data = $jsonContent | ConvertFrom-Json
+    return $data
+}
 
-    ShowCurrentTemperatures
-  }
+# Function to perform a health check on the miner
+function Perform-HealthCheck() {
+    $data = Get-MinerData -name "summary"
+    if ($null -eq $data) {
+        return $false
+    }
 
-  Start-Sleep -Seconds 10
+    $miningSpeedString = $data.SUMMARY."GHS 5s"
+    $miningSpeed = [decimal]::Parse($miningSpeedString)
+
+    return (($null -ne $miningSpeed) -and ($miningSpeed -gt 0))
+}
+
+# Function to get maximum temperature from miner data
+function Get-MaxTemperature() {
+    $data = Get-MinerData -name "stats"
+    if ($null -eq $data) {
+        return $null
+    }
+
+    $temps = @(
+        $data.STATS[1].temp_pcb1,
+        $data.STATS[1].temp_pcb2,
+        $data.STATS[1].temp_pcb3
+    )
+
+    return ($temps | Measure-Object -Maximum).Maximum
+}
+
+# Function to show current temperatures
+function Show-CurrentTemperatures() {
+    $data = Get-MinerData -name "stats"
+    if ($null -eq $data) {
+        Write-Output "No data available to show temperatures."
+        return
+    }
+
+    $tempProps = $data.STATS[1].PSObject.Properties |
+        Where-Object { $_.Name -like '*temp*' -and $_.Value -match '[1-9]' }
+
+    foreach ($prop in $tempProps) {
+        Write-Output ("[{0:u}] {1}={2}" -f (Get-Date), $prop.Name, $prop.Value)
+    }
+}
+
+# Main monitoring loop
+while ($true) {
+    $isHealthy = Perform-HealthCheck
+
+    Write-Output ("[{0:u}] Healthy: {1}" -f (Get-Date), $isHealthy)
+
+    if (-not $isHealthy) {
+        Show-CurrentTemperatures
+        Write-Output ("[{0:u}] Waiting for 3 minutes..." -f (Get-Date))
+        Start-Sleep -Seconds 180
+
+        Write-Output ("[{0:u}] Initiating restart" -f (Get-Date))
+        Invoke-WebRequest -Uri "http://10.128.1.218/cgi-bin/reboot.cgi" -Credential $credential -AllowUnencryptedAuthentication
+        Start-Sleep -Seconds 90
+
+        while ($true) {
+            $isHealthy = Perform-HealthCheck
+            if ($isHealthy) { break }
+            Write-Output ("[{0:u}] Waiting for startup..." -f (Get-Date))
+            Start-Sleep -Seconds 10
+        }
+
+        Write-Output ("[{0:u}] Reboot complete" -f (Get-Date))
+        Show-CurrentTemperatures
+    }
+
+    Start-Sleep -Seconds 10
 }
